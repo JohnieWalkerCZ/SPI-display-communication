@@ -1,0 +1,63 @@
+dependencies:
+  espressif/esp_lcd_touch:
+    component_hash: 779b4ba2464a3ae85681e4b860caa5fdc35801458c23f3039ee761bae7f442a4
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.2
+  espressif/esp_lcd_touch_tt21100:
+    component_hash: 31894c5572927cb2dc65e5087572c4bd71d572fda3ef7e3320cb735af228c423
+    dependencies:
+    - name: espressif/esp_lcd_touch
+      registry_url: https://components.espressif.com
+      require: public
+      version: ^1.1.0
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.1
+  georgik/esp_raylib_port:
+    component_hash: ed890d6959a6c2162fe62029d514cf4ad29cf29e26d08e283bef06a13d5a4f20
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
+  georgik/raylib:
+    component_hash: 37f34708c5aa4bf31c3185580f61e5df7d77d2711555afb11d19300948fda59f
+    dependencies:
+    - name: espressif/esp_lcd_touch_tt21100
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: georgik/esp_raylib_port
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.0
+    - name: idf
+      require: private
+      version: '>=5.5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 5.6.0
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+direct_dependencies:
+- georgik/raylib
+- idf
+manifest_hash: cbc09e6480c9f66a54e054adc4c183dc64142e12ddd9633b683c237cfb0d680e
+target: esp32s3
+version: 2.0.0

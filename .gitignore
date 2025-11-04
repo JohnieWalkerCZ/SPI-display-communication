@@ -1,0 +1,5 @@
+slave/build
+master/build
+master/managed_components
+master/.cache
+slave/.cache
