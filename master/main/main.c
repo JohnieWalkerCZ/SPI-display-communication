@@ -2,9 +2,8 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 // Custom SPI pins for ESP32-S3 MASTER
@@ -18,6 +17,11 @@
 #define POT1_GPIO 1
 #define POT2_GPIO 2
 
+// Button pins for RGB control
+#define BUTTON_RED_GPIO 18
+#define BUTTON_GREEN_GPIO 16
+#define BUTTON_BLUE_GPIO 42
+
 // ADC parameters
 #define ADC_WIDTH ADC_WIDTH_BIT_12
 #define ADC_ATTEN ADC_ATTEN_DB_11
@@ -26,41 +30,61 @@
 #define DISPLAY_WIDTH 64
 #define DISPLAY_HEIGHT 64
 
+// Color increment value
+#define COLOR_INCREMENT 32
+
 static const char *TAG = "SPI_MASTER_S3";
 
-// Framebuffer structure - each pixel is 1 byte (grayscale)
+// RGB pixel structure
 typedef struct {
-    uint8_t pixels[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} rgb_pixel_t;
+
+// Framebuffer structure - each pixel is 3 bytes (RGB)
+typedef struct {
+    rgb_pixel_t pixels[DISPLAY_WIDTH * DISPLAY_HEIGHT];
 } framebuffer_t;
 
-// Function declarations (REMOVE 'static' from declarations)
+// Current color state
+typedef struct {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} color_state_t;
+
+// Function declarations
 esp_err_t initialize_spi_bus(void);
 esp_err_t initialize_spi_device(spi_device_handle_t *spi_handle);
 esp_err_t initialize_adc(void);
+esp_err_t initialize_buttons(void);
 uint8_t read_potentiometer_value(int gpio_num);
-void update_framebuffer(framebuffer_t *fb, uint8_t x_pos, uint8_t y_pos);
+void update_color_state(void);
+void update_framebuffer(framebuffer_t *fb, uint8_t x_pos, uint8_t y_pos,
+                        color_state_t *color);
 void send_framebuffer(spi_device_handle_t spi_handle, framebuffer_t *fb);
 
-// Function definitions (keep as they are, without 'static')
+// Global color state
+color_state_t current_color = {255, 255, 255}; // Start with white
+
+// Function definitions
 esp_err_t initialize_spi_bus(void) {
     ESP_LOGI(TAG, "Initializing SPI bus...");
 
     // SPI bus configuration
-    spi_bus_config_t buscfg = {
-        .miso_io_num = PIN_NUM_MISO,
-        .mosi_io_num = PIN_NUM_MOSI,
-        .sclk_io_num = PIN_NUM_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .data4_io_num = -1,
-        .data5_io_num = -1,
-        .data6_io_num = -1,
-        .data7_io_num = -1,
-        //                               .max_transfer_sz =
-        //                               sizeof(framebuffer_t) + 10,
-        .max_transfer_sz = 4097,
-        .flags = 0,
-        .intr_flags = 0};
+    spi_bus_config_t buscfg = {.miso_io_num = PIN_NUM_MISO,
+                               .mosi_io_num = PIN_NUM_MOSI,
+                               .sclk_io_num = PIN_NUM_CLK,
+                               .quadwp_io_num = -1,
+                               .quadhd_io_num = -1,
+                               .data4_io_num = -1,
+                               .data5_io_num = -1,
+                               .data6_io_num = -1,
+                               .data7_io_num = -1,
+                               .max_transfer_sz = sizeof(framebuffer_t) + 10,
+                               .flags = 0,
+                               .intr_flags = 0};
 
     // Initialize SPI bus
     esp_err_t ret = spi_bus_initialize(SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
@@ -121,6 +145,31 @@ esp_err_t initialize_adc(void) {
     return ESP_OK;
 }
 
+esp_err_t initialize_buttons(void) {
+    ESP_LOGI(TAG, "Initializing buttons for RGB control...");
+
+    // Configure button GPIOs as inputs with pull-up resistors
+    gpio_config_t button_config = {.pin_bit_mask = (1ULL << BUTTON_RED_GPIO) |
+                                                   (1ULL << BUTTON_GREEN_GPIO) |
+                                                   (1ULL << BUTTON_BLUE_GPIO),
+                                   .mode = GPIO_MODE_INPUT,
+                                   .pull_up_en = GPIO_PULLUP_ENABLE,
+                                   .pull_down_en = GPIO_PULLDOWN_DISABLE,
+                                   .intr_type = GPIO_INTR_DISABLE};
+
+    esp_err_t ret = gpio_config(&button_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure buttons: 0x%x", ret);
+        return ret;
+    }
+
+    ESP_LOGI(TAG,
+             "Buttons initialized: Red(GPIO %d), Green(GPIO %d), Blue(GPIO %d)",
+             BUTTON_RED_GPIO, BUTTON_GREEN_GPIO, BUTTON_BLUE_GPIO);
+
+    return ESP_OK;
+}
+
 uint8_t read_potentiometer_value(int gpio_num) {
     int adc_reading = 0;
 
@@ -137,10 +186,10 @@ uint8_t read_potentiometer_value(int gpio_num) {
         return 0;
     }
 
-    // Convert 12-bit ADC reading (0-4095) to 0-9 range for 10x10 display
+    // Convert 12-bit ADC reading (0-4095) to 0-63 range for 64x64 display
     uint8_t mapped_value = (uint8_t)((adc_reading * DISPLAY_WIDTH) / 4096);
 
-    // Clamp to 0-9 range
+    // Clamp to 0-63 range
     if (mapped_value >= DISPLAY_WIDTH) {
         mapped_value = DISPLAY_WIDTH - 1;
     }
@@ -148,8 +197,43 @@ uint8_t read_potentiometer_value(int gpio_num) {
     return mapped_value;
 }
 
+void update_color_state(void) {
+    static uint32_t last_button_check = 0;
+    const uint32_t debounce_delay = 200; // 200ms debounce
+
+    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    // Check if enough time has passed for debouncing
+    if (current_time - last_button_check < debounce_delay) {
+        return;
+    }
+
+    last_button_check = current_time;
+
+    // Check red button (GPIO 18)
+    if (gpio_get_level(BUTTON_RED_GPIO) ==
+        0) { // Button pressed (active low with pull-up)
+        current_color.r = (current_color.r + COLOR_INCREMENT) % 256;
+        ESP_LOGI(TAG, "Red button pressed - R: %d", current_color.r);
+    }
+
+    // Check green button (GPIO 16)
+    if (gpio_get_level(BUTTON_GREEN_GPIO) == 0) { // Button pressed
+        current_color.g = (current_color.g + COLOR_INCREMENT) % 256;
+        ESP_LOGI(TAG, "Green button pressed - G: %d", current_color.g);
+    }
+
+    // Check blue button (GPIO 42)
+    if (gpio_get_level(BUTTON_BLUE_GPIO) == 0) { // Button pressed
+        current_color.b = (current_color.b + COLOR_INCREMENT) % 256;
+        ESP_LOGI(TAG, "Blue button pressed - B: %d", current_color.b);
+    }
+}
+
 void draw_circle(framebuffer_t *fb, uint8_t x_center, uint8_t y_center,
-                 uint8_t radius) {
+                 color_state_t *color) {
+    uint8_t radius = 15;
+
     for (int y = -radius; y <= radius; y++) {
         for (int x = -radius; x <= radius; x++) {
             if (x * x + y * y <= radius * radius) {
@@ -157,18 +241,23 @@ void draw_circle(framebuffer_t *fb, uint8_t x_center, uint8_t y_center,
                 int draw_y = y_center + y;
                 if (draw_x >= 0 && draw_x < DISPLAY_WIDTH && draw_y >= 0 &&
                     draw_y < DISPLAY_HEIGHT) {
-                    fb->pixels[draw_y * DISPLAY_WIDTH + draw_x] = 255; // White
+                    int index = draw_y * DISPLAY_WIDTH + draw_x;
+                    fb->pixels[index].r = color->r;
+                    fb->pixels[index].g = color->g;
+                    fb->pixels[index].b = color->b;
                 }
             }
         }
     }
 }
 
-void update_framebuffer(framebuffer_t *fb, uint8_t x_pos, uint8_t y_pos) {
-    // Clear the framebuffer (set all pixels to 0)
+void update_framebuffer(framebuffer_t *fb, uint8_t x_pos, uint8_t y_pos,
+                        color_state_t *color) {
+    // Clear the framebuffer (set all pixels to black)
     memset(fb->pixels, 0, sizeof(fb->pixels));
 
-    draw_circle(fb, x_pos, y_pos, 15); // Draw circle with radius 3
+    // Draw circle with the current color
+    draw_circle(fb, x_pos, y_pos, color);
 }
 
 void send_framebuffer(spi_device_handle_t spi_handle, framebuffer_t *fb) {
@@ -222,6 +311,12 @@ void app_main(void) {
         return;
     }
 
+    // Initialize buttons for RGB control
+    ret = initialize_buttons();
+    if (ret != ESP_OK) {
+        return;
+    }
+
     // Create framebuffer on HEAP instead of stack
     framebuffer_t *display_fb = (framebuffer_t *)malloc(sizeof(framebuffer_t));
     if (display_fb == NULL) {
@@ -236,23 +331,32 @@ void app_main(void) {
              sizeof(framebuffer_t));
     ESP_LOGI(TAG, "MISO: GPIO %d, MOSI: GPIO %d, SCLK: GPIO %d, CS: GPIO %d",
              PIN_NUM_MISO, PIN_NUM_MOSI, PIN_NUM_CLK, PIN_NUM_CS);
-    ESP_LOGI(TAG, "Reading potentiometers and sending framebuffer to slave...");
+    ESP_LOGI(TAG, "Buttons: Red(GPIO %d), Green(GPIO %d), Blue(GPIO %d)",
+             BUTTON_RED_GPIO, BUTTON_GREEN_GPIO, BUTTON_BLUE_GPIO);
+    ESP_LOGI(TAG, "Color increment: %d per button press", COLOR_INCREMENT);
+    ESP_LOGI(TAG, "Reading potentiometers and buttons, sending RGB framebuffer "
+                  "to slave...");
 
     // Main loop for SPI communication
     while (1) {
         // Read potentiometer values
-        uint8_t pot1_val = read_potentiometer_value(POT1_GPIO);
-        uint8_t pot2_val = read_potentiometer_value(POT2_GPIO);
+        uint8_t pot1_val = read_potentiometer_value(POT1_GPIO); // X position
+        uint8_t pot2_val = read_potentiometer_value(POT2_GPIO); // Y position
 
-        ESP_LOGI(TAG, "Pot1 (X): %d, Pot2 (Y): %d", pot1_val, pot2_val);
+        // Update color state based on button presses
+        update_color_state();
 
-        // Update framebuffer with pixel at potentiometer positions
-        update_framebuffer(display_fb, pot1_val, pot2_val);
+        // Log current state
+        ESP_LOGI(TAG, "Pos(X: %d, Y: %d), Color(R: %d, G: %d, B: %d)", pot1_val,
+                 pot2_val, current_color.r, current_color.g, current_color.b);
+
+        // Update framebuffer with RGB circle at potentiometer positions
+        update_framebuffer(display_fb, pot1_val, pot2_val, &current_color);
 
         // Send framebuffer over SPI
         send_framebuffer(spi, display_fb);
 
-        // Small delay to avoid flooding the SPI bus
+        // Small delay to avoid flooding the SPI bus and for button debouncing
         vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay for smoother updates
     }
 

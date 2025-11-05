@@ -1,5 +1,8 @@
 slave/build
 master/build
+master-raylib/build
 master/managed_components
+master-raylib/managed_components
 master/.cache
 slave/.cache
+master-raylib/.cache
